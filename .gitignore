@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+node_modules/
+supabase/.temp/
+.vscode/
+previews/
+*.inspect.ndjson
+.DS_Store
+Thumbs.db
+supabase/.temp/
+.vscode/

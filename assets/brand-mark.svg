@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">CA4 Exam</title>
+  <rect width="64" height="64" rx="18" fill="#102b4e"/>
+  <path d="M16 18h32v7H16z" fill="#e24b4b"/>
+  <path d="M16 31h20v6H16zm0 12h32v6H16z" fill="#fff"/>
+  <circle cx="45" cy="34" r="5" fill="#35a36f"/>
+</svg>

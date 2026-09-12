@@ -862,12 +862,48 @@
     const filtered = result.review.filter((item) => filter === "all" || (filter === "correct" ? item.is_correct : !item.is_correct));
     document.body.className = "";
     app.innerHTML = `<main class="result-page"><header class="result-head"><div class="result-head-inner"><div><h1>Kết quả bài kiểm tra</h1><p>${esc(result.exam_title)}</p></div><a class="btn btn-secondary" href="#/home">Về danh sách bài</a></div></header><div class="result-content"><section class="score-panel"><div class="score-ring" style="--score:${percent}%"><div><strong>${Number(result.score).toFixed(2)}</strong><span>trên ${result.total_points} điểm</span></div></div><div class="score-copy"><h2>${result.correct_count >= 48 ? "Kết quả tốt" : result.correct_count >= 36 ? "Đã nắm được phần lớn nội dung" : "Cần ôn lại các phần còn sai"}</h2><p>Kết quả chỉ hiển thị trong phiên hiện tại. Hệ thống không lưu đáp án chi tiết sau khi bạn rời trang.</p><div class="score-stats"><div class="score-stat"><span>Trả lời đúng</span><strong>${result.correct_count}/60</strong></div><div class="score-stat"><span>Trả lời sai</span><strong>${60 - result.correct_count}/60</strong></div><div class="score-stat"><span>Lý do nộp</span><strong>${result.automatic_reason === "time" ? "Hết giờ" : result.automatic_reason === "violations" ? "3 cảnh báo" : "Chủ động"}</strong></div></div></div></section>
-      <div class="review-toolbar"><h2>Xem lại từng câu</h2><div class="review-filters"><button class="filter-pill ${filter === "all" ? "active" : ""}" data-filter="all">Tất cả</button><button class="filter-pill ${filter === "correct" ? "active" : ""}" data-filter="correct">Câu đúng</button><button class="filter-pill ${filter === "wrong" ? "active" : ""}" data-filter="wrong">Câu sai</button></div></div><div class="review-list">${filtered.map(reviewItem).join("")}</div></div></main>`;
+      <div class="review-toolbar"><h2>Xem lại từng câu</h2><div class="review-filters"><button class="filter-pill ${filter === "all" ? "active" : ""}" data-filter="all">Tất cả</button><button class="filter-pill ${filter === "correct" ? "active" : ""}" data-filter="correct">Câu đúng</button><button class="filter-pill ${filter === "wrong" ? "active" : ""}" data-filter="wrong">Câu sai</button></div></div><div class="review-list">${reviewList(filtered)}</div></div></main>`;
     document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => renderResult(button.dataset.filter)));
   }
 
+  function reviewGroupCode(item) {
+    if (item.group_code) return item.group_code;
+    return state.activeExam?.questions?.find((question) => question.number === item.number)?.group_code || "";
+  }
+
+  function reviewList(items) {
+    const parts = [];
+    let index = 0;
+    while (index < items.length) {
+      const item = items[index];
+      const groupCode = reviewGroupCode(item);
+      if (!groupCode) {
+        parts.push(reviewItem(item));
+        index += 1;
+        continue;
+      }
+      const groupItems = [];
+      while (index < items.length && reviewGroupCode(items[index]) === groupCode) {
+        groupItems.push(items[index]);
+        index += 1;
+      }
+      parts.push(reviewGroup(groupCode, groupItems));
+    }
+    return parts.join("");
+  }
+
+  function reviewGroup(groupCode, visibleItems) {
+    const passage = state.activeExam?.passages?.find((item) => item.group_code === groupCode);
+    const allItems = state.result?.review?.filter((item) => reviewGroupCode(item) === groupCode) || visibleItems;
+    const numbers = allItems.map((item) => Number(item.number)).filter(Number.isFinite).sort((a, b) => a - b);
+    const first = numbers[0] || visibleItems[0]?.number || "";
+    const last = numbers[numbers.length - 1] || visibleItems[visibleItems.length - 1]?.number || first;
+    const correctCount = allItems.filter((item) => item.is_correct).length;
+    const headingId = `review-group-${String(groupCode).replace(/[^a-z0-9_-]/gi, "")}`;
+    return `<section class="review-group" aria-labelledby="${headingId}"><header class="review-passage"><div class="review-passage-copy"><div class="review-passage-meta"><span class="review-passage-label">Tình huống ${esc(groupCode)}</span><span class="review-passage-range">Câu ${first}–${last}</span></div><h3 id="${headingId}">Đọc lại tình huống dùng chung</h3>${passage?.content ? `<p>${esc(passage.content)}</p>` : ""}</div><div class="review-group-score" aria-label="${correctCount} trên ${allItems.length} câu đúng"><strong>${correctCount}/${allItems.length}</strong><span>câu đúng</span></div></header><div class="review-group-items">${visibleItems.map(reviewItem).join("")}</div></section>`;
+  }
+
   function reviewItem(item) {
-    const label = item.is_correct ? "Đúng" : "Sai";
     return `<article class="review-item ${item.is_correct ? "correct" : "wrong"}"><div class="review-title"><span class="review-badge">${item.number}</span><p>${esc(item.stem)}</p></div><div class="review-answer"><div class="answer-box"><span>Bạn trả lời</span>${esc(item.user_answer_display || "Không trả lời")}</div><div class="answer-box"><span>Đáp án đúng</span>${esc(item.correct_answer_display)}</div></div>${item.explanation ? `<div class="review-explanation"><strong>Giải thích:</strong> ${esc(item.explanation)}</div>` : ""}</article>`;
   }
 

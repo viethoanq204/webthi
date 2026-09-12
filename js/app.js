@@ -84,7 +84,13 @@
 
   async function api(action, payload = {}) {
     const { data, error } = await sb.functions.invoke(config.functionName, { body: { action, ...payload } });
-    if (error) throw new Error(error.message || "Không thể kết nối máy chủ.");
+    if (error) {
+      let serverMessage = data?.error || "";
+      if (!serverMessage && error.context instanceof Response) {
+        try { serverMessage = (await error.context.clone().json())?.error || ""; } catch { /* Phản hồi không phải JSON. */ }
+      }
+      throw new Error(serverMessage || error.message || "Không thể kết nối máy chủ.");
+    }
     if (!data?.ok) throw new Error(data?.error || "Yêu cầu không thành công.");
     return data.data;
   }
@@ -251,21 +257,34 @@
       const data = await api("admin-list-catalog");
       state.folders = data.folders || [];
       state.exams = data.exams || [];
+      state.adminUsers = data.students || [];
       return;
     }
     const [{ data: folders, error: folderError }, { data: exams, error: examError }] = await Promise.all([
       sb.from("folders").select("id,name,sort_order").order("sort_order").order("name"),
-      sb.from("exam_catalog").select("*").eq("status", "published").order("created_at", { ascending: false }),
+      sb.from("exam_catalog").select("*").order("created_at", { ascending: false }),
     ]);
     if (folderError || examError) throw new Error("Không thể tải danh sách bài kiểm tra.");
     state.folders = folders || [];
     state.exams = exams || [];
   }
 
+  function examStatus(status, assignedCount = 0, admin = false) {
+    if (status === "assigned") {
+      return {
+        className: "status-assigned",
+        label: admin ? `Đã giao · ${assignedCount} học viên` : "Được giao",
+      };
+    }
+    if (status === "published") return { className: "status-published", label: "Công bố" };
+    return { className: "status-draft", label: "Bản nháp" };
+  }
+
   function examCard(exam, admin = false) {
     const remaining = exam.max_attempts === 0 ? "Không giới hạn" : `${Math.max(0, exam.max_attempts - Number(exam.used_attempts || 0))} lượt còn lại`;
+    const status = examStatus(exam.status, Number(exam.assigned_count || exam.assigned_user_ids?.length || 0), admin);
     return `<article class="exam-card" data-title="${esc((exam.title || "").toLowerCase())}" data-status="${esc(exam.status)}">
-      <div class="exam-card-top"><div class="exam-number">CA4</div><span class="status ${exam.status === "published" ? "status-published" : "status-draft"}">${exam.status === "published" ? "Đã công bố" : "Bản nháp"}</span></div>
+      <div class="exam-card-top"><div class="exam-number">CA4</div><span class="status ${status.className}">${esc(status.label)}</span></div>
       <h3>${esc(exam.title)}</h3><p>${esc(exam.description || "Bài kiểm tra theo cấu trúc CA4 gồm 60 câu.")}</p>
       <div class="exam-meta"><span>${icons.clock}${exam.duration_minutes} phút</span><span>${icons.repeat}${remaining}</span><span>${icons.file}60 câu</span></div>
       <div class="exam-card-actions">
@@ -275,7 +294,7 @@
   }
 
   function catalogSections(exams, admin = false) {
-    if (!exams.length) return `<div class="empty"><div class="empty-icon">${icons.file}</div><h3>Chưa có bài kiểm tra</h3><p>${admin ? "Tải file đề đúng định dạng để tạo bài kiểm tra đầu tiên." : "Quản trị viên chưa công bố bài kiểm tra nào."}</p></div>`;
+    if (!exams.length) return `<div class="empty"><div class="empty-icon">${icons.file}</div><h3>Chưa có bài kiểm tra</h3><p>${admin ? "Tải file đề đúng định dạng để tạo bài kiểm tra đầu tiên." : "Chưa có bài công khai hoặc bài được giao cho bạn."}</p></div>`;
     const folderMap = new Map(state.folders.map((folder) => [folder.id, folder.name]));
     const groups = new Map();
     exams.forEach((exam) => {
@@ -289,12 +308,13 @@
   async function renderDashboard() {
     shell("Bài kiểm tra", `<div class="page-heading"><div><h2>Chào ${esc(state.profile.display_name)}</h2><p>Chọn bài kiểm tra và bắt đầu khi bạn đã sẵn sàng.</p></div></div><div id="catalog-loading" class="empty"><div class="empty-icon">${icons.clock}</div><h3>Đang tải bài kiểm tra</h3></div>`, "home");
     await loadCatalog(false);
-    const published = state.exams;
-    const limited = published.filter((x) => x.max_attempts > 0).length;
+    const available = state.exams;
+    const assigned = available.filter((x) => x.status === "assigned").length;
+    const limited = available.filter((x) => x.max_attempts > 0).length;
     document.querySelector(".content").innerHTML = `<div class="page-heading"><div><h2>Chào ${esc(state.profile.display_name)}</h2><p>Chọn bài kiểm tra và bắt đầu khi bạn đã sẵn sàng.</p></div></div>
-      <div class="stats"><div class="stat-card"><span>Bài đang mở</span><strong>${published.length}</strong><div class="stat-line"></div></div><div class="stat-card"><span>Cấu trúc mỗi đề</span><strong>60 câu</strong><div class="stat-line"></div></div><div class="stat-card"><span>Bài giới hạn lượt</span><strong>${limited}</strong><div class="stat-line"></div></div></div>
+      <div class="stats"><div class="stat-card"><span>Bài có thể làm</span><strong>${available.length}</strong><div class="stat-line"></div></div><div class="stat-card"><span>Bài được giao riêng</span><strong>${assigned}</strong><div class="stat-line"></div></div><div class="stat-card"><span>Bài giới hạn lượt</span><strong>${limited}</strong><div class="stat-line"></div></div></div>
       <div class="toolbar"><div class="search">${icons.search}<input class="input" id="catalog-search" placeholder="Tìm bài kiểm tra"></div><select class="select filter-select" id="folder-filter"><option value="">Tất cả thư mục</option>${state.folders.map((f) => `<option value="${f.id}">${esc(f.name)}</option>`).join("")}</select></div>
-      <div id="catalog">${catalogSections(published)}</div>`;
+      <div id="catalog">${catalogSections(available)}</div>`;
     bindCatalogControls(false);
   }
 
@@ -329,7 +349,7 @@
   async function renderAdminExams() {
     shell("Quản lý bài kiểm tra", `<div class="empty"><div class="empty-icon">${icons.clock}</div><h3>Đang tải dữ liệu</h3></div>`, "admin-exams");
     await loadCatalog(true);
-    document.querySelector(".content").innerHTML = `<div class="page-heading"><div><h2>Quản lý bài kiểm tra</h2><p>Tạo đề từ file chuẩn, chỉnh thông tin và kiểm soát trạng thái công bố.</p></div><div class="heading-actions"><button class="btn btn-primary" id="import-exam">${icons.upload}Tải đề lên</button></div></div>
+    document.querySelector(".content").innerHTML = `<div class="page-heading"><div><h2>Quản lý bài kiểm tra</h2><p>Tạo đề từ file chuẩn, công bố rộng rãi hoặc giao cho từng nhóm học viên.</p></div><div class="heading-actions"><button class="btn btn-primary" id="import-exam">${icons.upload}Tải đề lên</button></div></div>
       <div class="toolbar"><div class="search">${icons.search}<input class="input" id="catalog-search" placeholder="Tìm bài kiểm tra"></div><select class="select filter-select" id="folder-filter"><option value="">Tất cả thư mục</option>${state.folders.map((f) => `<option value="${f.id}">${esc(f.name)}</option>`).join("")}</select></div>
       <div id="catalog">${catalogSections(state.exams, true)}</div>`;
     document.getElementById("import-exam").addEventListener("click", openImportExam);
@@ -339,21 +359,53 @@
   function openEditExam(id) {
     const exam = state.exams.find((x) => x.id === id);
     if (!exam) return;
+    const selectedIds = new Set(exam.assigned_user_ids || []);
+    const students = [...state.adminUsers].sort((a, b) => Number(b.active) - Number(a.active) || a.display_name.localeCompare(b.display_name, "vi"));
+    const studentRows = students.length ? students.map((student) => `<label class="assignee-row ${student.active ? "" : "is-disabled"}" data-assignee-search="${esc(`${student.display_name} ${student.email}`.toLowerCase())}">
+      <input type="checkbox" name="assigned_user_ids" value="${student.id}" ${selectedIds.has(student.id) && student.active ? "checked" : ""} ${student.active ? "" : "disabled"}>
+      <span class="assignee-check">${icons.check}</span><span class="assignee-person"><strong>${esc(student.display_name)}</strong><small>${esc(student.email)}</small></span>
+      <span class="assignee-state ${student.active ? "active" : "locked"}">${student.active ? "Hoạt động" : "Đã khóa"}</span>
+    </label>`).join("") : `<div class="assignee-empty">Chưa có tài khoản học viên để giao bài.</div>`;
     openModal("Sửa bài kiểm tra", `<form id="edit-exam-form"><div class="form-grid">
       <div class="field span-2"><label>Tên bài kiểm tra</label><input class="input" name="title" value="${esc(exam.title)}" required maxlength="160"></div>
       <div class="field span-2"><label>Mô tả</label><textarea class="textarea" name="description" maxlength="500">${esc(exam.description || "")}</textarea></div>
       <div class="field"><label>Thời gian (phút)</label><input class="input" name="duration_minutes" type="number" min="1" max="300" value="${exam.duration_minutes}" required></div>
       <div class="field"><label>Số lượt làm</label><input class="input" name="max_attempts" type="number" min="0" max="1000" value="${exam.max_attempts}" required><span class="field-help">Nhập 0 để không giới hạn.</span></div>
       <div class="field"><label>Thư mục</label><select class="select" name="folder_id"><option value="">Chưa phân loại</option>${state.folders.map((f) => `<option value="${f.id}" ${f.id === exam.folder_id ? "selected" : ""}>${esc(f.name)}</option>`).join("")}</select></div>
-      <div class="field"><label>Trạng thái</label><select class="select" name="status"><option value="draft" ${exam.status === "draft" ? "selected" : ""}>Bản nháp</option><option value="published" ${exam.status === "published" ? "selected" : ""}>Công bố</option></select></div>
-    </div><div class="form-actions"><button class="btn btn-secondary" type="button" data-close-modal>Hủy</button><button class="btn btn-primary" type="submit">Lưu thay đổi</button></div></form>`);
+      <div class="field"><label>Phạm vi bài kiểm tra</label><select class="select" name="status" id="exam-status"><option value="draft" ${exam.status === "draft" ? "selected" : ""}>Bản nháp</option><option value="published" ${exam.status === "published" ? "selected" : ""}>Công bố cho mọi học viên</option><option value="assigned" ${exam.status === "assigned" ? "selected" : ""}>Giao theo học viên</option></select></div>
+      <section class="assignment-panel span-2 ${exam.status === "assigned" ? "" : "hidden"}" id="assignment-panel">
+        <div class="assignment-head"><div><strong>Chọn học viên nhận bài</strong><span id="assignment-summary">Đã chọn 0 học viên</span></div><div class="assignment-actions"><button type="button" class="text-btn" id="select-all-students">Chọn tất cả</button><button type="button" class="text-btn" id="clear-students">Bỏ chọn</button></div></div>
+        <div class="assignment-search">${icons.search}<input class="input" id="student-search" type="search" placeholder="Tìm theo họ tên hoặc email" autocomplete="off"></div>
+        <div class="assignee-list" id="assignee-list">${studentRows}</div>
+        <p class="assignment-note">Chỉ tài khoản đang hoạt động mới được chọn. Tất cả học viên dùng chung thời gian và số lượt làm đã đặt cho bài.</p>
+      </section>
+    </div><div class="form-actions"><button class="btn btn-secondary" type="button" data-close-modal>Hủy</button><button class="btn btn-primary" type="submit">Lưu thay đổi</button></div></form>`, { large: true });
     modalRoot.querySelector("[data-close-modal]").addEventListener("click", closeModal);
+    const statusSelect = document.getElementById("exam-status");
+    const assignmentPanel = document.getElementById("assignment-panel");
+    const activeChecks = () => [...document.querySelectorAll('input[name="assigned_user_ids"]:not(:disabled)')];
+    const updateAssignmentSummary = () => {
+      const count = activeChecks().filter((input) => input.checked).length;
+      document.getElementById("assignment-summary").textContent = `Đã chọn ${count} học viên`;
+    };
+    statusSelect.addEventListener("change", () => assignmentPanel.classList.toggle("hidden", statusSelect.value !== "assigned"));
+    document.getElementById("student-search")?.addEventListener("input", (event) => {
+      const query = event.target.value.trim().toLowerCase();
+      document.querySelectorAll("[data-assignee-search]").forEach((row) => row.classList.toggle("hidden", query && !row.dataset.assigneeSearch.includes(query)));
+    });
+    document.getElementById("select-all-students")?.addEventListener("click", () => { activeChecks().forEach((input) => { input.checked = true; }); updateAssignmentSummary(); });
+    document.getElementById("clear-students")?.addEventListener("click", () => { activeChecks().forEach((input) => { input.checked = false; }); updateAssignmentSummary(); });
+    activeChecks().forEach((input) => input.addEventListener("change", updateAssignmentSummary));
+    updateAssignmentSummary();
     document.getElementById("edit-exam-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const fd = new FormData(event.currentTarget);
       const button = event.submitter; button.disabled = true;
       try {
-        await api("admin-update-exam", { examId: id, patch: { title: fd.get("title"), description: fd.get("description"), duration_minutes: Number(fd.get("duration_minutes")), max_attempts: Number(fd.get("max_attempts")), folder_id: fd.get("folder_id") || null, status: fd.get("status") } });
+        const status = fd.get("status");
+        const assignedUserIds = status === "assigned" ? fd.getAll("assigned_user_ids") : [];
+        if (status === "assigned" && assignedUserIds.length === 0) throw new Error("Hãy chọn ít nhất một học viên để giao bài.");
+        await api("admin-update-exam", { examId: id, patch: { title: fd.get("title"), description: fd.get("description"), duration_minutes: Number(fd.get("duration_minutes")), max_attempts: Number(fd.get("max_attempts")), folder_id: fd.get("folder_id") || null, status, assigned_user_ids: assignedUserIds } });
         closeModal(); toast("Đã cập nhật bài kiểm tra.", "success"); renderAdminExams();
       } catch (error) { toast(error.message, "error"); button.disabled = false; }
     });
@@ -609,7 +661,13 @@
   async function renderExamEntry(shareCode) {
     document.body.className = "";
     app.innerHTML = `<main class="brief-page"><section class="brief-card"><div class="brief-body"><div class="empty"><div class="empty-icon">${icons.clock}</div><h3>Đang chuẩn bị bài kiểm tra</h3></div></div></section></main>`;
-    const data = await api("get-exam", { shareCode });
+    let data;
+    try {
+      data = await api("get-exam", { shareCode });
+    } catch (error) {
+      app.innerHTML = `<main class="brief-page"><section class="brief-card"><header class="brief-head"><img src="assets/brand-mark.svg" alt=""><div><h1>CA4 Exam</h1><p>Quyền truy cập bài kiểm tra</p></div></header><div class="brief-body"><div class="access-denied">${icons.alert}<div><h2>Không thể mở bài kiểm tra</h2><p>${esc(error.message || "Bạn không có quyền truy cập bài kiểm tra này.")}</p></div></div><div class="brief-actions"><a class="btn btn-primary" href="#/home">Về danh sách bài</a></div></div></section></main>`;
+      return;
+    }
     state.activeExam = data.exam;
     const exam = data.exam;
     const remaining = exam.max_attempts === 0 ? "Không giới hạn" : `${Math.max(0, exam.max_attempts - exam.used_attempts)} lượt`;

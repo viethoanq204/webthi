@@ -8,8 +8,11 @@ do $$ begin
 exception when duplicate_object then null; end $$;
 
 do $$ begin
-  create type public.exam_status as enum ('draft', 'published');
+  create type public.exam_status as enum ('draft', 'published', 'assigned');
 exception when duplicate_object then null; end $$;
+
+-- Bổ sung trạng thái cho các dự án đã cài phiên bản cũ.
+alter type public.exam_status add value if not exists 'assigned';
 
 do $$ begin
   create type public.question_kind as enum ('DON', 'NHOM', 'NGAN');
@@ -55,6 +58,18 @@ create table if not exists public.exams (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- Danh sách học viên được giao một bài có trạng thái assigned.
+-- Mỗi học viên vẫn dùng duration_minutes và max_attempts chung của bài kiểm tra.
+create table if not exists public.exam_assignments (
+  exam_id uuid not null references public.exams(id) on delete cascade,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  assigned_by uuid references public.profiles(id) on delete set null,
+  assigned_at timestamptz not null default now(),
+  primary key (exam_id, user_id)
+);
+
+create index if not exists exam_assignments_user_id_idx on public.exam_assignments(user_id);
 
 create table if not exists public.passages (
   id uuid primary key default gen_random_uuid(),
@@ -151,6 +166,81 @@ returns boolean language sql stable security definer set search_path = public as
   select exists(select 1 from public.profiles where id = auth.uid() and role = 'admin' and active);
 $$;
 
+-- Cập nhật thông tin và phạm vi giao bài trong cùng một giao dịch.
+-- Chỉ Edge Function (service_role) được phép gọi hàm này.
+create or replace function public.admin_update_exam_settings(
+  p_exam_id uuid,
+  p_title text,
+  p_description text,
+  p_duration_minutes integer,
+  p_max_attempts integer,
+  p_folder_id uuid,
+  p_status text,
+  p_assigned_user_ids uuid[],
+  p_actor_id uuid
+)
+returns void language plpgsql security definer set search_path = public as $$
+declare
+  requested_count integer;
+  valid_count integer;
+begin
+  if p_status not in ('draft', 'published', 'assigned') then
+    raise exception 'INVALID_STATUS';
+  end if;
+
+  if p_title is null or char_length(btrim(p_title)) not between 1 and 160
+     or p_duration_minutes not between 1 and 300
+     or p_max_attempts < 0 then
+    raise exception 'INVALID_EXAM_SETTINGS';
+  end if;
+
+  select count(distinct item)::integer into requested_count
+  from unnest(coalesce(p_assigned_user_ids, array[]::uuid[])) as item;
+
+  if p_status = 'assigned' then
+    if requested_count = 0 then
+      raise exception 'ASSIGNEES_REQUIRED';
+    end if;
+
+    select count(*)::integer into valid_count
+    from public.profiles
+    where id = any(coalesce(p_assigned_user_ids, array[]::uuid[]))
+      and role = 'student'
+      and active = true;
+
+    if valid_count <> requested_count then
+      raise exception 'INVALID_ASSIGNEES';
+    end if;
+  end if;
+
+  update public.exams
+  set title = btrim(p_title),
+      description = coalesce(p_description, ''),
+      duration_minutes = p_duration_minutes,
+      max_attempts = p_max_attempts,
+      folder_id = p_folder_id,
+      status = p_status::public.exam_status
+  where id = p_exam_id;
+
+  if not found then
+    raise exception 'EXAM_NOT_FOUND';
+  end if;
+
+  delete from public.exam_assignments where exam_id = p_exam_id;
+
+  if p_status = 'assigned' then
+    insert into public.exam_assignments(exam_id, user_id, assigned_by)
+    select p_exam_id, item, p_actor_id
+    from (
+      select distinct unnest(p_assigned_user_ids) as item
+    ) selected;
+  end if;
+end;
+$$;
+
+revoke all on function public.admin_update_exam_settings(uuid, text, text, integer, integer, uuid, text, uuid[], uuid) from public, anon, authenticated;
+grant execute on function public.admin_update_exam_settings(uuid, text, text, integer, integer, uuid, text, uuid[], uuid) to service_role;
+
 create or replace function public.start_exam_attempt(
   p_user_id uuid,
   p_exam_id uuid,
@@ -202,6 +292,7 @@ grant execute on function public.start_exam_attempt(uuid, uuid, integer, integer
 alter table public.profiles enable row level security;
 alter table public.folders enable row level security;
 alter table public.exams enable row level security;
+alter table public.exam_assignments enable row level security;
 alter table public.passages enable row level security;
 alter table public.questions enable row level security;
 alter table public.question_keys enable row level security;
@@ -215,16 +306,31 @@ drop policy if exists folders_read on public.folders;
 create policy folders_read on public.folders for select to authenticated using (true);
 
 drop policy if exists exams_read on public.exams;
-create policy exams_read on public.exams for select to authenticated using (status = 'published' or public.is_admin());
+create policy exams_read on public.exams for select to authenticated using (
+  status::text = 'published'
+  or public.is_admin()
+  or (
+    status::text = 'assigned'
+    and exists(
+      select 1 from public.exam_assignments a
+      where a.exam_id = id and a.user_id = auth.uid()
+    )
+  )
+);
+
+drop policy if exists exam_assignments_read on public.exam_assignments;
+create policy exam_assignments_read on public.exam_assignments for select to authenticated using (
+  user_id = auth.uid() or public.is_admin()
+);
 
 drop policy if exists passages_read on public.passages;
 create policy passages_read on public.passages for select to authenticated using (
-  exists(select 1 from public.exams e where e.id = exam_id and (e.status = 'published' or public.is_admin()))
+  exists(select 1 from public.exams e where e.id = exam_id)
 );
 
 drop policy if exists questions_read on public.questions;
 create policy questions_read on public.questions for select to authenticated using (
-  exists(select 1 from public.exams e where e.id = exam_id and (e.status = 'published' or public.is_admin()))
+  exists(select 1 from public.exams e where e.id = exam_id)
 );
 
 -- Không tạo policy cho question_keys: authenticated/anon không thể đọc đáp án.
@@ -247,4 +353,5 @@ left join public.attempt_counters c on c.exam_id = e.id and c.user_id = auth.uid
 
 grant select on public.exam_catalog to authenticated;
 grant usage on schema public to authenticated;
-grant select on public.profiles, public.folders, public.exams, public.passages, public.questions, public.attempt_counters, public.active_attempts to authenticated;
+revoke all on table public.exam_assignments from anon, authenticated;
+grant select on public.profiles, public.folders, public.exams, public.exam_assignments, public.passages, public.questions, public.attempt_counters, public.active_attempts to authenticated;

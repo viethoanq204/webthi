@@ -42,6 +42,12 @@ function normalizeAnswer(value: unknown) {
     .replace(/[.,;:!?]+$/g, "");
 }
 
+function uniqueUuidList(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  return [...new Set(value.map((item) => cleanText(item, 50)).filter((item) => uuid.test(item)))];
+}
+
 async function caller(req: Request) {
   const authHeader = req.headers.get("Authorization") || "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
@@ -101,8 +107,15 @@ function validateExam(input: any) {
 }
 
 async function examForUser(shareCode: string, userId: string) {
-  const { data: exam, error } = await admin.from("exams").select("id,title,description,duration_minutes,max_attempts,status,share_code,total_points").eq("share_code", shareCode).eq("status", "published").single();
-  if (error || !exam) fail("Bài kiểm tra không tồn tại hoặc chưa được công bố.", 404);
+  const { data: exam, error } = await admin.from("exams").select("id,title,description,duration_minutes,max_attempts,status,share_code,total_points").eq("share_code", shareCode).maybeSingle();
+  if (error || !exam || exam.status === "draft") fail("Bài kiểm tra không tồn tại hoặc chưa được mở.", 404);
+  if (exam.status === "assigned") {
+    const { data: assignment, error: assignmentError } = await admin.from("exam_assignments").select("exam_id").eq("exam_id", exam.id).eq("user_id", userId).maybeSingle();
+    if (assignmentError) fail("Không thể kiểm tra quyền làm bài.", 500);
+    if (!assignment) fail("Bài kiểm tra này chưa được giao cho tài khoản của bạn.", 403);
+  } else if (exam.status !== "published") {
+    fail("Bài kiểm tra không tồn tại hoặc chưa được mở.", 404);
+  }
   const { data: counter } = await admin.from("attempt_counters").select("used_attempts").eq("user_id", userId).eq("exam_id", exam.id).maybeSingle();
   const used = Number(counter?.used_attempts || 0);
   return { ...exam, used_attempts: used, can_start: exam.max_attempts === 0 || used < exam.max_attempts };
@@ -267,11 +280,27 @@ Deno.serve(async (req: Request) => {
     }
 
     if (action === "admin-list-catalog") {
-      const [{ data: folders }, { data: exams }] = await Promise.all([
+      const [folderResult, examResult, assignmentResult, studentResult] = await Promise.all([
         admin.from("folders").select("id,name,sort_order,created_at").order("sort_order").order("name"),
         admin.from("exams").select("id,folder_id,title,description,duration_minutes,max_attempts,status,share_code,created_at").order("created_at", { ascending: false }),
+        admin.from("exam_assignments").select("exam_id,user_id"),
+        admin.from("profiles").select("id,email,display_name,active,created_at").eq("role", "student").order("display_name"),
       ]);
-      return reply(req, 200, { ok: true, data: { folders: folders || [], exams: exams || [] } });
+      if (folderResult.error || examResult.error || assignmentResult.error || studentResult.error) fail("Không thể tải dữ liệu quản lý bài kiểm tra.", 500);
+      const folders = folderResult.data || [];
+      const exams = examResult.data || [];
+      const assignments = assignmentResult.data || [];
+      const students = studentResult.data || [];
+      const assignedByExam = new Map<string, string[]>();
+      for (const row of assignments) {
+        if (!assignedByExam.has(row.exam_id)) assignedByExam.set(row.exam_id, []);
+        assignedByExam.get(row.exam_id)!.push(row.user_id);
+      }
+      const catalog = exams.map((exam: any) => {
+        const assignedUserIds = assignedByExam.get(exam.id) || [];
+        return { ...exam, assigned_user_ids: assignedUserIds, assigned_count: assignedUserIds.length };
+      });
+      return reply(req, 200, { ok: true, data: { folders, exams: catalog, students } });
     }
 
     if (action === "admin-save-folder") {
@@ -304,10 +333,30 @@ Deno.serve(async (req: Request) => {
         folder_id: patch.folder_id || null,
         status: patch.status,
       };
-      if (!update.title || !Number.isInteger(update.duration_minutes) || update.duration_minutes < 1 || update.duration_minutes > 300 || !Number.isInteger(update.max_attempts) || update.max_attempts < 0 || !["draft", "published"].includes(update.status)) fail("Thông tin bài kiểm tra không hợp lệ.");
-      const { error } = await admin.from("exams").update(update).eq("id", cleanText(body.examId, 50));
-      if (error) fail("Không thể cập nhật bài kiểm tra.");
-      return reply(req, 200, { ok: true, data: { updated: true } });
+      const rawAssignedUserIds = Array.isArray(patch.assigned_user_ids) ? patch.assigned_user_ids.map((item: unknown) => cleanText(item, 50)) : [];
+      const assignedUserIds = uniqueUuidList(rawAssignedUserIds);
+      if (!update.title || !Number.isInteger(update.duration_minutes) || update.duration_minutes < 1 || update.duration_minutes > 300 || !Number.isInteger(update.max_attempts) || update.max_attempts < 0 || !["draft", "published", "assigned"].includes(update.status)) fail("Thông tin bài kiểm tra không hợp lệ.");
+      if (update.status === "assigned" && assignedUserIds.length === 0) fail("Hãy chọn ít nhất một học viên để giao bài.");
+      if (update.status === "assigned" && assignedUserIds.length !== new Set(rawAssignedUserIds).size) fail("Danh sách học viên được giao không hợp lệ.");
+      const { error } = await admin.rpc("admin_update_exam_settings", {
+        p_exam_id: cleanText(body.examId, 50),
+        p_title: update.title,
+        p_description: update.description,
+        p_duration_minutes: update.duration_minutes,
+        p_max_attempts: update.max_attempts,
+        p_folder_id: update.folder_id,
+        p_status: update.status,
+        p_assigned_user_ids: update.status === "assigned" ? assignedUserIds : [],
+        p_actor_id: profile.id,
+      });
+      if (error) {
+        if (error.message.includes("ASSIGNEES_REQUIRED")) fail("Hãy chọn ít nhất một học viên để giao bài.");
+        if (error.message.includes("INVALID_ASSIGNEES")) fail("Danh sách có tài khoản không hợp lệ hoặc đã bị khóa.");
+        if (error.message.includes("EXAM_NOT_FOUND")) fail("Bài kiểm tra không tồn tại.", 404);
+        console.error(error);
+        fail("Không thể cập nhật bài kiểm tra.", 500);
+      }
+      return reply(req, 200, { ok: true, data: { updated: true, assigned_count: update.status === "assigned" ? assignedUserIds.length : 0 } });
     }
 
     if (action === "admin-delete-exam") {

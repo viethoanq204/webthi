@@ -73,6 +73,10 @@ Hệ thống dùng định tuyến sau dấu `#`, vì vậy link chia sẻ đề
 6. Đăng nhập học viên, mở đề, trả lời đủ 60 câu và nộp.
 7. Kiểm tra điểm, màu đúng/sai, giới hạn lượt và cảnh báo thoát toàn màn hình.
 
+## Nâng cấp chức năng giao bài theo học viên
+
+Nếu hệ thống bản v1 của bạn đã hoạt động, không chạy lại toàn bộ file `schema.sql`. Thực hiện đúng thứ tự trong `HUONG_DAN_NANG_CAP_GIAO_BAI.md` để giữ nguyên dữ liệu đang có.
+
 ## Giới hạn kỹ thuật cần biết
 
 - Trình duyệt không thể ngăn tuyệt đối chụp màn hình, quay màn hình hoặc dùng thiết bị khác chụp lại.

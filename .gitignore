@@ -8,5 +8,3 @@ previews/
 *.inspect.ndjson
 .DS_Store
 Thumbs.db
-supabase/.temp/
-.vscode/

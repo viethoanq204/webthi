@@ -141,7 +141,7 @@
     document.body.className = "";
     app.innerHTML = `<main class="login-page">
       <section class="login-panel"><div class="login-card">
-        <div class="login-identity"><img src="assets/brand-mark.svg" alt="Biểu trưng CA4 Exam"><div><strong>CA4 Exam</strong><span>Hệ thống ôn thi Văn bằng 2 Công an</span></div></div>
+        <div class="login-identity"><img src="assets/brand-mark.svg" alt="Biểu trưng CA4 Exam"><div><strong>CA4 Exam</strong><span>Hệ thống ôn thi</span></div></div>
         <h2>Đăng nhập</h2><p>Sử dụng tài khoản được quản trị viên cấp để tiếp tục.</p>
         <form class="login-form" id="login-form">
           <div class="field"><label for="login-email">Tài khoản</label><input class="input" id="login-email" type="email" autocomplete="username" placeholder="Nhập tên tài khoản" required></div>
